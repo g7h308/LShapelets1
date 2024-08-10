@@ -18,7 +18,7 @@ The following assumes that the directory is `c:/hoge/UCRArchive_2018`.
 
 For example, you can run the command on ItalyPowerDemand dataset
 ```shell
-python main.py --dataset_dir 'C:/hoge/UCRArchive_2018/ItalyPowerDemand' --K 30 --dropout 0.25
+python main.py --dataset_dir C:/hoge/UCRArchive_2018/ItalyPowerDemand --K 30 --dropout 0.25
 ```
 to test the model.
-See Tables II and III in the paper for other datasets.
+See Table II in the paper for other datasets.
