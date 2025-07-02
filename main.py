@@ -22,6 +22,8 @@ class FeatureBlock(nn.Module):
         self.scaleType = self.shapelet_info["scaleType"]
         tmp = torch.FloatTensor(shapelet)
         self.shapelet = nn.Parameter(tmp.view(L), requires_grad=True)
+        #初始化为全零。根据论文的惩罚函数，m_k,j = 0 时，p(0) = ELU(0) + 2 = 2，这意味着初始时所有位置的惩罚是一样的，没有偏好
+        #pDic["Q"] - (self.shapelet.shape[-1]-1)*self.dilation: 这个表达式计算了 shapelet 在时间序列上所有可能的起始位置数量，即 J_k，这确定了 posMap 的长度。
         self.posMap = nn.Parameter(torch.zeros(pDic["Q"] - (self.shapelet.shape[-1]-1)*self.dilation), requires_grad=True)
         self.posSlope = nn.Parameter(torch.tensor(1.0), requires_grad=False)
         self.pDic = pDic
@@ -51,6 +53,7 @@ class FeatureBlock(nn.Module):
         else:
             d_segs = (self.shapelet.view(1,1,1,-1) - x_unfold)**2
         del x_unfold
+        #self.raw_ftrs 计算了 shapelet 与时间序列所有可能子序列的平均平方距离 d(...)
         ftrsPart0 = d_segs.mean(axis=3)
         self.raw_ftrs = ftrsPart0
         del d_segs
@@ -272,6 +275,7 @@ class LearningShapeletsModel(nn.Module):
         if show_progress == True:
             from tqdm import tqdm_notebook as tqdm
             pbar = tqdm(pbar)
+        # 外部循环
         for nMerge in pbar:
             n_shapelets = pDic["maxFSInnerItr"]
             lengths = np.random.choice(pDic["Lcands"], size=n_shapelets).astype(np.int64)
@@ -289,7 +293,9 @@ class LearningShapeletsModel(nn.Module):
             candidateJDic = {}
             acceptS = [] 
             fX = np.empty([I, 0])
+            # 内部循环，随机抽样
             for n in range(pDic["maxFSInnerItr"]):
+                # 随机选择 L, dilation, scaleType, i, j
                 L, dilation, scaleType = lengths[n].item(), dilations[n].item(), scaleTypes[n].item()
                 thSimilarSeg = thSimilarSegDic[(L,scaleType)]
 
@@ -304,6 +310,7 @@ class LearningShapeletsModel(nn.Module):
                 tmp1 = candidateSDic[(m,dilation,scaleType,L)]
                 tmp2 = candidateJDic[(m,dilation,scaleType,L)]
                 self.initNumAllCount += 1
+                # 去冗余检查
                 if len(tmp1)==0 or self.isNovelSeg(T_all[i,j,:], tmp1, thSimilarSeg, j, tmp2):
                     self.initNovelCounts += [n]
                     seg = T_all[i,j,:].copy()
@@ -314,13 +321,21 @@ class LearningShapeletsModel(nn.Module):
                     newX = self.dst2ftr(self.seg2dst(T_all[:,start:end+1,:], seg))
 
                     candidateJDic[(m,dilation,scaleType,L)] = np.vstack([candidateJDic[(m,dilation,scaleType,L)], np.array([start,end])])
+                    # 将合格的候选片段信息存入 acceptS
                     acceptS += [(seg,dilation,scaleType,i,m,j,mean,std,start,end)]
+                    # 计算这个新片段对应的特征，并加入特征矩阵 fX
                     fX = np.hstack([fX, newX[:,:]])
-            
+            # 计算这个新片段对应的特征，并加入特征矩阵 fX
             fX2 = StandardScaler(with_mean=True).fit_transform(fX)
             nGroupMembers = int(fX.shape[1]/len(acceptS))
+            #使用逻辑回归
+
+
             clf1 = LogisticRegressionWithFS(nGroupMembers=nGroupMembers, pDic=pDic, C=1.0, penalty='l1', solver='liblinear').fit(fX2,Y)
+
+            # 根据筛选结果，保留被选中的片段
             acceptS = [ v for i,v in enumerate(acceptS) if i in clf1.idxs ]
+            # 同时，也缩减特征矩阵，只保留被选中特征对应的列
             fX = clf1.reduceFX(fX)
             acceptSmerge += copy.deepcopy(acceptS)
             fXmerge = np.hstack([fXmerge, copy.deepcopy(fX)])
@@ -397,8 +412,13 @@ class LogisticRegressionWithFS(LogisticRegression):
         super().__init__(C=C, penalty=penalty, solver=solver)
 
     def fit(self, fX, Y):
+        # 1. 训练一个标准的L1正则化逻辑回归
         super().fit(fX, Y)
+        # 2. 计算每个特征的重要性分数
+        # self.coef_ 是训练后得到的权重矩阵
         magnitude = (self.coef_**2).mean(axis=0).reshape(self.nGroupMembers,-1).sum(axis=0)
+        # 3. 排序并选出Top K
+        # pDic["numFSK"] 就是超参数 K
         self.idxs = np.argsort(magnitude)[::-1][:self.pDic["numFSK"]]
         self.clf2 = LogisticRegression(C=1.0, penalty='l2', solver='liblinear', random_state=self.pDic["randseed"]).fit(self.reduceFX(fX),Y)
         return self
